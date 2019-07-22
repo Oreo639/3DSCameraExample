@@ -10,12 +10,13 @@
 
 #include <3ds.h>
 
-Handle threadHandle, threadExitRequest, y2rEvent;
+Handle threadExitRequest, y2rEvent;
+Thread threadHandle;
 
 #define STACKSIZE (4 * 1024)
 
-volatile bool threadExit = false;
-volatile u8 *send, *recv;
+volatile bool threadQuit = false;
+volatile u8 *send_t, *recv_t;
 
 #define WAIT_TIMEOUT 1000000000ULL
 #define WIDTH 400
@@ -36,7 +37,6 @@ void writePictureToFramebufferRGB24_Y2R(void *fb, void *img, u16 x, u16 y, u16 w
 
 void cameraThread(void *arg)
 {
-    acInit();
 
     gfxSetDoubleBuffering(GFX_TOP, true);
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
@@ -46,7 +46,8 @@ void cameraThread(void *arg)
     printf("CAMU_SetSize: 0x%08X\n", (unsigned int) CAMU_SetSize(SELECT_OUT1_OUT2, SIZE_CTR_TOP_LCD, CONTEXT_A));
     printf("CAMU_SetOutputFormat: 0x%08X\n", (unsigned int) CAMU_SetOutputFormat(SELECT_OUT1_OUT2, OUTPUT_YUV_422, CONTEXT_A));
 
-    printf("CAMU_SetFrameRate: 0x%08X\n", (unsigned int) CAMU_SetFrameRate(SELECT_OUT1_OUT2, FRAME_RATE_30));
+    // TODO: For some reason frame grabbing times out above 10fps. Figure out why this is.
+    printf("CAMU_SetFrameRate: 0x%08X\n", (unsigned int) CAMU_SetFrameRate(SELECT_OUT1_OUT2, FRAME_RATE_10));
 
     printf("CAMU_SetNoiseFilter: 0x%08X\n", (unsigned int) CAMU_SetNoiseFilter(SELECT_OUT1_OUT2, true));
     printf("CAMU_SetAutoExposure: 0x%08X\n", (unsigned int) CAMU_SetAutoExposure(SELECT_OUT1_OUT2, true));
@@ -55,7 +56,7 @@ void cameraThread(void *arg)
     printf("CAMU_SetTrimming: 0x%08X\n", (unsigned int) CAMU_SetTrimming(PORT_CAM1, false));
     printf("CAMU_SetTrimming: 0x%08X\n", (unsigned int) CAMU_SetTrimming(PORT_CAM2, false));
 
-    if(!send) {
+    if(!send_t) {
         printf("Failed to allocate memory!");
         svcExitThread();
     }
@@ -75,11 +76,11 @@ void cameraThread(void *arg)
     printf("CAMU_StartCapture: 0x%08X\n", (unsigned int) CAMU_StartCapture(PORT_BOTH));
     printf("CAMU_PlayShutterSound: 0x%08X\n", (unsigned int) CAMU_PlayShutterSound(SHUTTER_SOUND_TYPE_MOVIE));
 
-    while(!threadExit)
+    while(!threadQuit)
     {
 
-        CAMU_SetReceiving(&camReceiveEvent, (void*) send, PORT_CAM1, SCREEN_SIZE, (s16) bufSize);
-        CAMU_SetReceiving(&camReceiveEvent2, (void*)(send + SCREEN_SIZE), PORT_CAM2, SCREEN_SIZE, (s16) bufSize);
+        CAMU_SetReceiving(&camReceiveEvent, (void*) send_t, PORT_CAM1, SCREEN_SIZE, (s16) bufSize);
+        CAMU_SetReceiving(&camReceiveEvent2, (void*)(send_t + SCREEN_SIZE), PORT_CAM2, SCREEN_SIZE, (s16) bufSize);
 
         svcWaitSynchronization(camReceiveEvent, WAIT_TIMEOUT);
         svcWaitSynchronization(camReceiveEvent2, WAIT_TIMEOUT);
@@ -92,33 +93,42 @@ void cameraThread(void *arg)
 
     printf("CAMU_Activate: 0x%08X\n", (unsigned int) CAMU_Activate(SELECT_NONE));
 
-    free((void*) send);
+    free((void*) send_t);
     camExit();
     acExit();
     svcSignalEvent(threadExitRequest);
     svcExitThread();
 }
 
+void cleanup() {
+	camExit();
+	y2rExit();
+	gfxExit();
+	acExit();
+}
+
 int main(int argc, char** argv)
 {
+    // Initializations
+    acInit();
     gfxInitDefault();
-
     consoleInit(GFX_BOTTOM, NULL);
 
+    // Use y2r for YUV to RGB conversion
     y2rInit();
-    Y2R_ConversionParams convParams = {INPUT_YUV422_BATCH, OUTPUT_RGB_24 , ROTATION_CLOCKWISE_90,
+    Y2RU_ConversionParams convParams = {INPUT_YUV422_BATCH, OUTPUT_RGB_24 , ROTATION_CLOCKWISE_90,
                                        BLOCK_LINE, WIDTH, HEIGHT, COEFFICIENT_ITU_R_BT_709, 0, 0}; // output rotated and converted to RGB 24
-    printf("Y2R_Params: 0x%08X\n", Y2RU_SetConversionParams(&convParams));
+    printf("Y2R_Params: 0x%08X\n", (unsigned int) Y2RU_SetConversionParams(&convParams));
 
 
-    svcCreateEvent(&threadExitRequest, 0);
-    u32 *threadStack = (u32*)memalign(32, STACKSIZE);
-    Result ret = svcCreateThread(&threadHandle, cameraThread, 0, &threadStack[STACKSIZE / 4], 0x2F, 0);
+    s32 prio = 0;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    threadHandle = threadCreate(cameraThread, (void*)((1)*250), STACKSIZE, prio-1, -2, false);
 
-    printf("Thread create returned %x\n", ret);
+   // printf("Thread create returned %x\n", ret);
 
-    send = (u8*)malloc(BUF_SIZE);               // the buffer for the camera
-    recv = (u8*)malloc((SCREEN_SIZE / 2) * 3);  // the necessary space for the rgb 24 datas of the image
+    send_t = (u8*)malloc(BUF_SIZE);               // the buffer for the camera
+    recv_t = (u8*)malloc((SCREEN_SIZE / 2) * 3);  // the necessary space for the rgb 24 datas of the image
 
     struct timeval previous;
     gettimeofday(&previous, 0);
@@ -142,12 +152,12 @@ int main(int argc, char** argv)
         fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL); // get the current framebuffer
 
         //TODO: Explain the rotation
-        Y2RU_SetSendingYUYV((u8 *) & send[0], WIDTH * 2 * HEIGHT, WIDTH * 2, 0);    // to send the YUV datas of the camera
-        Y2RU_SetReceiving((void *) &recv[0], WIDTH * 3 * HEIGHT, 3 * WIDTH, 0);     // to receive the new rgb 24 datas
+        Y2RU_SetSendingYUYV((u8 *) & send_t[0], WIDTH * 2 * HEIGHT, WIDTH * 2, 0);    // to send the YUV datas of the camera
+        Y2RU_SetReceiving((void *) &recv_t[0], WIDTH * 3 * HEIGHT, 3 * WIDTH, 0);     // to receive the new rgb 24 datas
         Y2RU_StartConversion();                                                     // to start the conversion
         svcWaitSynchronization(y2rEvent, 1000 * 1000 * 10);                         // wait the end of the conversion
 
-        writePictureToFramebufferRGB24_Y2R(fb, (void*) recv, 0, 0, WIDTH, HEIGHT);  // draw to the framebuffer
+        writePictureToFramebufferRGB24_Y2R(fb, (void*) recv_t, 0, 0, WIDTH, HEIGHT);  // draw to the framebuffer
 
         gettimeofday(&now, 0);
         count++;
@@ -166,18 +176,13 @@ int main(int argc, char** argv)
         gfxSwapBuffers();
     }
 
-    threadExit = true; // tell thread to exit
+    threadQuit = true; // tell thread to exit
 
     svcWaitSynchronization(threadExitRequest, WAIT_TIMEOUT); // wait the threadExit event
 
-    svcCloseHandle(threadExitRequest);
-    svcCloseHandle(threadHandle);
-    free(threadStack);
-    free((void*) recv);
+    free((void*) recv_t);
 
-    y2rExit();
-    gfxExit();
+    cleanup();
 
     return 0;
 }
-
