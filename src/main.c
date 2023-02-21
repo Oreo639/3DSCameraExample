@@ -16,7 +16,7 @@ Thread threadHandle;
 #define STACKSIZE (4 * 1024)
 
 volatile bool threadQuit = false;
-volatile u8 *send_t, *recv_t;
+volatile u8 *camBuf, *frameBuf;
 
 #define WAIT_TIMEOUT 1000000000ULL
 #define WIDTH 400
@@ -56,7 +56,7 @@ void cameraThread(void *arg)
     printf("CAMU_SetTrimming: 0x%08X\n", (unsigned int) CAMU_SetTrimming(PORT_CAM1, false));
     printf("CAMU_SetTrimming: 0x%08X\n", (unsigned int) CAMU_SetTrimming(PORT_CAM2, false));
 
-    if(!send_t) {
+    if(!camBuf) {
         printf("Failed to allocate memory!");
         svcExitThread();
     }
@@ -79,8 +79,8 @@ void cameraThread(void *arg)
     while(!threadQuit)
     {
 
-        CAMU_SetReceiving(&camReceiveEvent, (void*) send_t, PORT_CAM1, SCREEN_SIZE, (s16) bufSize);
-        CAMU_SetReceiving(&camReceiveEvent2, (void*)(send_t + SCREEN_SIZE), PORT_CAM2, SCREEN_SIZE, (s16) bufSize);
+        CAMU_SetReceiving(&camReceiveEvent, (void*) camBuf, PORT_CAM1, SCREEN_SIZE, (s16) bufSize);
+        CAMU_SetReceiving(&camReceiveEvent2, (void*)(camBuf + SCREEN_SIZE), PORT_CAM2, SCREEN_SIZE, (s16) bufSize);
 
         svcWaitSynchronization(camReceiveEvent, WAIT_TIMEOUT);
         svcWaitSynchronization(camReceiveEvent2, WAIT_TIMEOUT);
@@ -93,7 +93,7 @@ void cameraThread(void *arg)
 
     printf("CAMU_Activate: 0x%08X\n", (unsigned int) CAMU_Activate(SELECT_NONE));
 
-    free((void*) send_t);
+    free((void*) camBuf);
     camExit();
     acExit();
     svcSignalEvent(threadExitRequest);
@@ -128,7 +128,7 @@ int main(int argc, char** argv)
    // printf("Thread create returned %x\n", ret);
 
     send_t = (u8*)malloc(BUF_SIZE);               // the buffer for the camera
-    recv_t = (u8*)malloc((SCREEN_SIZE / 2) * 3);  // the necessary space for the rgb 24 datas of the image
+    frameBuf = (u8*)malloc((SCREEN_SIZE / 2) * 3);  // the necessary space for the rgb 24 datas of the image
 
     struct timeval previous;
     gettimeofday(&previous, 0);
@@ -153,11 +153,11 @@ int main(int argc, char** argv)
 
         //TODO: Explain the rotation
         Y2RU_SetSendingYUYV((u8 *) & send_t[0], WIDTH * 2 * HEIGHT, WIDTH * 2, 0);    // to send the YUV datas of the camera
-        Y2RU_SetReceiving((void *) &recv_t[0], WIDTH * 3 * HEIGHT, 3 * WIDTH, 0);     // to receive the new rgb 24 datas
+        Y2RU_SetReceiving((void *) &frameBuf[0], WIDTH * 3 * HEIGHT, 3 * WIDTH, 0);     // to receive the new rgb 24 datas
         Y2RU_StartConversion();                                                     // to start the conversion
         svcWaitSynchronization(y2rEvent, 1000 * 1000 * 10);                         // wait the end of the conversion
 
-        writePictureToFramebufferRGB24_Y2R(fb, (void*) recv_t, 0, 0, WIDTH, HEIGHT);  // draw to the framebuffer
+        writePictureToFramebufferRGB24_Y2R(fb, (void*) frameBuf, 0, 0, WIDTH, HEIGHT);  // draw to the framebuffer
 
         gettimeofday(&now, 0);
         count++;
@@ -180,7 +180,7 @@ int main(int argc, char** argv)
 
     svcWaitSynchronization(threadExitRequest, WAIT_TIMEOUT); // wait the threadExit event
 
-    free((void*) recv_t);
+    free((void*) frameBuf);
 
     cleanup();
 
